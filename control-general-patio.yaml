@@ -1,0 +1,191 @@
+esphome:
+  name: central-esp32-can-pool
+  friendly_name: "Nodo Central DWIN"
+  includes:
+    - dwin_handler.h # Acopla el archivo de cabecera C++ que contiene las funciones de Arduino
+
+  on_boot:
+    priority: -100
+    then: # Llama a la resincronización de variables de C++ guardadas en la flash
+      - lambda: |-
+          // 1. Instanciamos el objeto y lo registramos en el core principal de ESPHome
+          static auto *instance = new DWINHandler(id(dwin_uart));
+          App.register_component(instance);
+          global_custom_components.push_back(instance);
+          #define my_custom_node instance
+          
+      - lambda: |- # Dispara la restauración total de datos hacia los periféricos físicos al arrancar
+           my_custom_node->resincronizarTodo(id(p_color), id(p_retardo), id(p_dura), id(p_pot), id(p_filtra)); 
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino # Mantiene compatibilidad con tus tipos y conversiones de Arduino IDE 
+  variant: ESP32
+  
+
+
+# 🚀 NUEVA RUTA OFICIAL: Mapeo de tu código como componente nativo del sistema
+
+external_components:
+  - source:
+      type: local
+      path: . # Busca el archivo dwin_handler.h en la misma carpeta local de configuración
+
+# 📡 Habilitado en la raíz de forma independiente y limpia
+
+esp32_ble_tracker: # Inicializa el rastreador BLE del core para habilitar futuras integraciones
+  
+logger: # Consola de diagnóstico para monitorizar el tráfico por el puerto serie 
+
+api:
+  encryption:
+    key: "tEUG5kZNbuAfnEzomh2npi+rXzizQupvEsG3ZFYigmY=" # Llave de enlace encriptado con Home Assistant 
+
+ota:
+    - platform: esphome # Permite actualizar el firmware del ESP32 por Wi-Fi sin descolgarlo de la pared
+
+wifi:
+    ssid: !secret wifi_ssid
+    password: !secret wifi_password
+    ap:
+      ssid: Control general Fallback Hotspot
+      password: "qYW7lMg2DpjA" # Red de emergencia por si tu router principal se apaga o falla 
+
+### =====================================================================
+
+### 💾 MEMORIA PERSISTENTE INTEGRADA (Reemplazo absoluto de EEPROM.h)
+
+### =====================================================================
+
+
+globals:
+  - id: p_color
+    type: int
+    restore_value: true # Guarda automáticamente en la flash al mutar y sobrevive a apagones
+  - id: p_retardo
+    type: int
+    restore_value: true
+  - id: p_dura
+    type: int
+    restore_value: true
+  - id: p_pot
+    type: int
+    restore_value: true
+  - id: p_filtra
+    type: int
+    restore_value: true
+
+### Bus serie UART: Conectado a los pines lógicos de comunicación con la pantalla DWIN
+
+uart:
+  id: dwin_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 115200
+
+# 🛠️ Instanciación del objeto DWINHandler usando el componente nativo template  
+
+
+
+### =====================================================================
+
+### SENSÓRICA REAL AMBIENTAL Y REMOTA (Integración nativa)
+
+### =====================================================================
+
+
+
+sensor:
+
+
+      ### Captura bidireccional desde Home Assistant: Trae el pH medido por el EW11 en el clorador
+                
+  - platform: homeassistant
+    entity_id: sensor.sugar_valley_ph
+    id: piscina_ph
+    on_value:
+      then:
+        - lambda: 'my_custom_node->enviaValoresFlotantes(x, 0x30, 0x00);' # Escribe el pH en la VP 3000 de la DWIN
+
+switch:
+  - platform: gpio
+    pin: GPIO26
+    name: "Bomba Cascada"
+    id: bomba_cascada
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      then:
+        - lambda: 'my_custom_node->enviaValoresLargos(1, 0x39, 0x00);' # Sincroniza indicador encendido en DWIN VP 3900
+    on_turn_off:
+      then:
+        - lambda: 'my_custom_node->enviaValoresLargos(0, 0x39, 0x00);' # Sincroniza indicador apagado en DWIN VP 3900
+
+
+number:
+  - platform: template
+    name: "Consigna Frecuencia Filtración (Hz)"
+    id: hz_variador_filtracion
+    optimistic: true
+    min_value: 0
+    max_value: 50
+    step: 0.1
+    initial_value: 50
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            uint16_t hz_raw = (uint16_t)(x * 10);
+            my_custom_node->enviaValoresLargos(hz_raw, 0x38, 0x00);
+            std::vector<uint8_t> data = {1, (uint8_t)((hz_raw >> 8) & 0xFF), (uint8_t)(hz_raw & 0xFF), 0, 0, 0, 0, 0};
+            id(esphome_can_bus).send_data(0x310, false, data);
+
+### =====================================================================
+
+### 🎨 ILUMINACIÓN RGB CASCADA VIRTUAL (Hacia el Arduino Nano del Patio)
+
+### =====================================================================
+
+output:
+  - platform: template
+    id: salida_virtual_r
+    type: float
+    write_lambda: |-
+  - platform: template
+    id: salida_virtual_g
+    type: float
+    write_lambda: |-
+  - platform: template
+    id: salida_virtual_b
+    type: float
+    write_lambda: |-
+
+light:
+  - platform: rgb
+    name: "Iluminación Cascada"
+    id: rgb_cascada_virtual
+    red: salida_virtual_r
+    green: salida_virtual_g
+    blue: salida_virtual_b
+    on_state:
+      then:
+        - lambda: |-
+            std::vector<uint8_t> data(8, 0);
+            if (!id(rgb_cascada_virtual).state) {
+              data = 0;
+              id(esphome_can_bus).send_data(0x350, false, data);
+              my_custom_node->enviaValoresLargos(0, 0x60, 0x00);
+            } else {
+              float r_f, g_f, b_f;
+              id(rgb_cascada_virtual).current_values_as_rgb(&r_f, &g_f, &b_f);
+              uint8_t r = (uint8_t)(r_f * 255.0f);
+              uint8_t g = (uint8_t)(g_f * 255.0f);
+              uint8_t b = (uint8_t)(b_f * 255.0f);
+              data = 1;
+              data = r;
+              data = g;
+              data = b;
+              id(esphome_can_bus).send_data(0x350, false, data);
+              my_custom_node->enviaValoresLargos(4, 0x60, 0x00);
+            }
+
