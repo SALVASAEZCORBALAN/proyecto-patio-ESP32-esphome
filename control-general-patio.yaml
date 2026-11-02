@@ -3,29 +3,42 @@ esphome:
   friendly_name: "Nodo Central DWIN"
   includes:
     - dwin_handler.h # Acopla el archivo de cabecera C++ que contiene las funciones de Arduino
+  libraries:
+    - Wire
+    - SPI
+    - "Adafruit BME680 Library"
+    - "Adafruit BusIO"
+    - "Adafruit Unified Sensor"
 
+  # 🚀 REGISTRO Y ARRANQUE SEGURO DENTRO DEL EVENTO NATIVO DEL NÚCLEO
   on_boot:
     priority: -100
-    then: # Llama a la resincronización de variables de C++ guardadas en la flash
+    then: 
       - lambda: |-
-          // 1. Instanciamos el objeto y lo registramos en el core principal de ESPHome
+          // 1. Instanciamos el objeto de tu manejador compartiendo el puerto UART
           static auto *instance = new DWINHandler(id(dwin_uart));
-          App.register_component(instance);
-          global_custom_components.push_back(instance);
-          #define my_custom_node instance
+
+          // 2. Ejecutamos de forma inmediata el ciclo inicial de hardware
+          instance->setup();
           
-      - lambda: |- # Dispara la restauración total de datos hacia los periféricos físicos al arrancar
-           my_custom_node->resincronizarTodo(id(p_color), id(p_retardo), id(p_dura), id(p_pot), id(p_filtra)); 
+  on_loop:
+    then:
+      - lambda: |-
+          static bool sincronizacion_inicial_completada = false;
+          if (!sincronizacion_inicial_completada && my_custom_node != nullptr) {
+            sincronizacion_inicial_completada = true;
+            my_custom_node->resincronizarTodo(id(p_color), id(p_retardo), id(p_dura), id(p_pot), id(p_filtra));
+          }
+      
 
 esp32:
   board: esp32dev
   framework:
     type: arduino # Mantiene compatibilidad con tus tipos y conversiones de Arduino IDE 
-  variant: ESP32
-  
+  variant: ESP32  
+ 
 
-
-# 🚀 NUEVA RUTA OFICIAL: Mapeo de tu código como componente nativo del sistema
+# 🚀 NUEVA RUTA OFICIAL: Mapeo del código como componente nativo del sistema
 
 external_components:
   - source:
@@ -75,6 +88,7 @@ globals:
   - id: p_filtra
     type: int
     restore_value: true
+    
 
 ### Bus serie UART: Conectado a los pines lógicos de comunicación con la pantalla DWIN
 
@@ -116,10 +130,16 @@ switch:
     restore_mode: RESTORE_DEFAULT_OFF
     on_turn_on:
       then:
-        - lambda: 'my_custom_node->enviaValoresLargos(1, 0x39, 0x00);' # Sincroniza indicador encendido en DWIN VP 3900
+        - lambda: |-
+            if (my_custom_node != nullptr) {
+              my_custom_node->enviaValoresLargos(1, 0x39, 0x00);
+            } # Sincroniza indicador encendido en DWIN VP 3900
     on_turn_off:
       then:
-        - lambda: 'my_custom_node->enviaValoresLargos(0, 0x39, 0x00);' # Sincroniza indicador apagado en DWIN VP 3900
+        - lambda: |-
+            if (my_custom_node != nullptr) {
+              my_custom_node->enviaValoresLargos(0, 0x39, 0x00);
+            } # Sincroniza indicador apagado en DWIN VP 3900
 
 
 number:
@@ -137,8 +157,8 @@ number:
         - lambda: |-
             uint16_t hz_raw = (uint16_t)(x * 10);
             my_custom_node->enviaValoresLargos(hz_raw, 0x38, 0x00);
-            std::vector<uint8_t> data = {1, (uint8_t)((hz_raw >> 8) & 0xFF), (uint8_t)(hz_raw & 0xFF), 0, 0, 0, 0, 0};
-            id(esphome_can_bus).send_data(0x310, false, data);
+            std::vector<uint8_t> data_can = {1, (uint8_t)((hz_raw >> 8) & 0xFF), (uint8_t)(hz_raw & 0xFF), 0, 0, 0, 0, 0};
+            my_custom_node->enviarTramaCAN(0x310, data_can);
 
 ### =====================================================================
 
@@ -150,15 +170,19 @@ output:
   - platform: template
     id: salida_virtual_r
     type: float
-    write_lambda: |-
+    write_action:
+       logger.log: "Cambio de brillo Red virtual"
   - platform: template
     id: salida_virtual_g
     type: float
-    write_lambda: |-
+    write_action:
+       logger.log: "Cambio de brillo Green virtual"
+
   - platform: template
     id: salida_virtual_b
     type: float
-    write_lambda: |-
+    write_action:
+      logger.log: "Cambio de brillo Blue virtual"
 
 light:
   - platform: rgb
@@ -167,25 +191,54 @@ light:
     red: salida_virtual_r
     green: salida_virtual_g
     blue: salida_virtual_b
+    
+
+# 🚀 DECLARACIÓN DE EFECTOS NATIVOS PARA EL DESPLEGABLE DE HOME ASSISTANT
+
+    effects:
+      - lambda:
+          name: "Arcoíris Dinámico"
+          update_interval: 1s
+          lambda: |-
+            // Avisa a la máquina de estados del archivo .h que ejecute el efecto 5
+            my_custom_node->modo_efecto_rgb = 5;
+      - lambda:
+          name: "Estrobo Rápido"
+          update_interval: 1s
+          lambda: |-
+            // Avisa a la máquina de estados del archivo .h que ejecute el efecto 6
+            my_custom_node->modo_efecto_rgb = 6;
+      - lambda:
+          name: "Respiración Agua"
+          update_interval: 1s
+          lambda: |-
+            // Avisa a la máquina de estados del archivo .h que ejecute el efecto 7
+            my_custom_node->modo_efecto_rgb = 7;
     on_state:
-      then:
+        then:
         - lambda: |-
-            std::vector<uint8_t> data(8, 0);
-            if (!id(rgb_cascada_virtual).state) {
-              data = 0;
-              id(esphome_can_bus).send_data(0x350, false, data);
+            std::vector<uint8_t> data_can(8, 0);
+            // Si el usuario apaga la luz desde HA o borra el efecto volviendo a color fijo
+            if (!id(rgb_cascada_virtual).remote_values.is_on()) {
+              my_custom_node->modo_efecto_rgb = 0; // Desactiva efectos en segundo plano
+              data_can = {0, 0, 0, 0, 0, 0, 0, 0};
+              my_custom_node->enviarTramaCAN(0x350, data_can);
               my_custom_node->enviaValoresLargos(0, 0x60, 0x00);
-            } else {
+            } 
+            // Si la luz está encendida pero no tiene ningún efecto activo (es un color sólido)
+            else if (id(rgb_cascada_virtual).get_effect_name() == "None") {
+              my_custom_node->modo_efecto_rgb = 0; // Apaga motores de efectos continuos
+  
               float r_f, g_f, b_f;
               id(rgb_cascada_virtual).current_values_as_rgb(&r_f, &g_f, &b_f);
               uint8_t r = (uint8_t)(r_f * 255.0f);
               uint8_t g = (uint8_t)(g_f * 255.0f);
               uint8_t b = (uint8_t)(b_f * 255.0f);
-              data = 1;
-              data = r;
-              data = g;
-              data = b;
-              id(esphome_can_bus).send_data(0x350, false, data);
-              my_custom_node->enviaValoresLargos(4, 0x60, 0x00);
+  
+              // 🚀 Inicializamos todo el vector con sus datos reales en una sola línea
+              data_can = {1, r, g, b, 0, 0, 0, 0};
+
+              my_custom_node->enviarTramaCAN(0x350, data_can);
+              my_custom_node->enviaValoresLargos(4, 0x60, 0x00); // Sincroniza estado genérico encendido en DWIN
             }
 
